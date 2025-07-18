@@ -1,0 +1,263 @@
+import { QRScannerCard } from "@/components/QRScannerCard";
+import { TransactionReviewModal } from "@/components/TransactionReviewModal";
+import { ESGTransactionModal } from "@/components/ESGTransactionModal";
+import { AcknowledgementQRModal } from "@/components/AcknowledgementQRModal";
+import { Navigation } from "@/components/Navigation";
+import { useMerchantPublic } from "@/hooks/useMerchantPublic";
+import { useState } from "react";
+import { useAuth } from "@/contexts/AuthContext";
+import { useToast } from "@/hooks/use-toast";
+import { useOffline } from "@/contexts/OfflineContext";
+import {
+  decompressPayload,
+  decryptPayload,
+  verifySignature,
+  extractPayload,
+  classifyQrPayload,
+  generateKeys,
+  encryptPayload,
+  signPayload,
+  compressPayload,
+  encodeVerifyingKey
+} from "@/lib/qr-crypto-utils";
+import * as base85 from "@/lib/base85";
+import { 
+  getFalconKeyPair, 
+  encryptPayloadWithFalcon 
+} from "@/lib/falcon-encryption";
+
+export default function Scanner() {
+  const [scannedData, setScannedData] = useState<any>(null);
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [showESGModal, setShowESGModal] = useState(false);
+  const [showAckModal, setShowAckModal] = useState(false);
+  const [merchantProfile, setMerchantProfile] = useState<any>(null);
+  const { getMerchantByQR } = useMerchantPublic();
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const { addP2PTransaction, canAffordPayment, availableBalance, offlinePaymentLimit } = useOffline();
+
+  const handleQRScanned = async (data: any) => {
+    console.log("QR Scanned:", data);
+
+    try {
+      // Decompress the QR data
+      const decompressed = decompressPayload(data);
+      console.log("Decompressed payload:", decompressed);
+      
+      const { type, encrypted_data, encryption_key, signature, signature_key, iv, user_id } = decompressed;
+      
+      // Decode encryption key and verify signature
+      const keyArray = base85.decode(encryption_key);
+      const isValid = verifySignature(encrypted_data, iv, signature, signature_key);
+      console.log("Signature verification result:", isValid);
+      if (!isValid) {
+        console.error("Signature verification failed");
+        throw new Error("Signature verification failed");
+      }
+
+      // Decrypt the data
+      const decrypted = await decryptPayload(encrypted_data, iv, keyArray);
+      console.log("Decrypted data:", decrypted);
+
+      if (type === "PAYMENT") {
+        // Validate payment amount against balance and limits
+        const paymentAmount = Math.abs(decrypted.payment_data?.amount || 0);
+        
+        if (!canAffordPayment(paymentAmount)) {
+          const errorMessage = availableBalance !== null 
+            ? `Insufficient funds. Available: MYR ${availableBalance.toFixed(2)}, Required: MYR ${paymentAmount.toFixed(2)}`
+            : `Payment exceeds offline limit. Limit: MYR ${offlinePaymentLimit.toFixed(2)}, Required: MYR ${paymentAmount.toFixed(2)}`;
+            
+          toast({
+            title: "Payment Failed",
+            description: errorMessage,
+            variant: "destructive"
+          });
+          return;
+        }
+        
+        // Handle Payment QR
+        const paymentData = {
+          ...decompressed,
+          decrypted_data: decrypted,
+          type: "PAYMENT"
+        };
+        
+        // Store encrypted copy in local storage using Falcon
+        try {
+          const keyPair = await getFalconKeyPair();
+          const encryptedPayload = await encryptPayloadWithFalcon(paymentData, keyPair);
+          const storageKey = `payment_${Date.now()}`;
+          localStorage.setItem(storageKey, JSON.stringify(encryptedPayload));
+          console.log("Payment data encrypted with Falcon and stored:", storageKey);
+        } catch (falconError) {
+          console.error("Failed to encrypt payment data with Falcon:", falconError);
+        }
+        
+        setScannedData(paymentData);
+        setShowAckModal(true);
+        
+      } else if (type === "ACK") {
+        // Handle Acknowledgement QR - Transaction Complete
+        const ackData = {
+          ...decompressed,
+          decrypted_data: decrypted,
+          type: "ACK"
+        };
+        
+        // Get the buyer/seller IDs correctly
+        const buyerId = decompressed.user_id; // The ACK generator is the buyer
+        const sellerId = user?.id; // Current user scanning ACK is the seller
+        const amount = Math.abs(decrypted.amount || 0);
+        
+        if (!buyerId || !sellerId) {
+          toast({
+            title: "Transaction Error",
+            description: "Unable to identify buyer or seller",
+            variant: "destructive"
+          });
+          return;
+        }
+        
+        // Create P2P transaction (buyer pays seller)
+        await addP2PTransaction(buyerId, sellerId, amount, {
+          title: "QR Payment Transaction",
+          description: "Payment via QR Code",
+          merchant_name: decrypted.merchant || "Unknown Merchant",
+          location: decrypted.location || null,
+          tags: ["qr-payment"],
+          esg_score: 0.5 // Default ESG score
+        });
+        
+        // Store encrypted ACK copy in local storage for records using Falcon
+        try {
+          const keyPair = await getFalconKeyPair();
+          const encryptedAckPayload = await encryptPayloadWithFalcon(ackData, keyPair);
+          const storageKey = `ack_${Date.now()}`;
+          localStorage.setItem(storageKey, JSON.stringify(encryptedAckPayload));
+          console.log("ACK data encrypted with Falcon and stored:", storageKey);
+        } catch (falconError) {
+          console.error("Failed to encrypt ACK data with Falcon:", falconError);
+        }
+      }
+      
+    } catch (err) {
+      console.error("Invalid QR payload:", err);
+      toast({
+        title: "Invalid QR Code",
+        description: "Failed to process QR code",
+        variant: "destructive"
+      });
+    }
+  };
+
+  const handleCloseModal = () => {
+    setShowReviewModal(false);
+    setScannedData(null);
+  };
+
+  const handleESGTransactionConfirm = () => {
+    setShowESGModal(false);
+    setMerchantProfile(null);
+    setScannedData(null);
+  };
+
+  const handleGenerateAcknowledgement = async (paymentData: any) => {
+    try {
+      const timestamp = Date.now();
+      const ackPayload = {
+        amount: paymentData.decrypted_data.payment_data.amount,
+        timestamp: paymentData.decrypted_data.payment_data.timestamp
+      };
+
+      // Generate new keys for acknowledgement
+      const { aesKey, sk, vk } = generateKeys();
+      
+      // Encrypt the acknowledgement data
+      const { cipher, iv } = await encryptPayload(ackPayload, aesKey);
+      
+      // Sign the encrypted data
+      const sig = signPayload(cipher, iv, sk);
+      
+      // Create acknowledgement QR payload
+      const ackQrPayload = {
+        type: "ACK",
+        status: "ACK",
+        user_id: user?.id || null,
+        encrypted_data: cipher,
+        encryption_key: base85.encode(aesKey),
+        signature: sig,
+        signature_key: encodeVerifyingKey(vk),
+        iv
+      };
+      
+      // Store encrypted copy in local storage using Falcon
+      try {
+        const keyPair = await getFalconKeyPair();
+        const encryptedAckPayload = await encryptPayloadWithFalcon(ackQrPayload, keyPair);
+        const storageKey = `ack_generated_${timestamp}`;
+        localStorage.setItem(storageKey, JSON.stringify(encryptedAckPayload));
+        console.log("Generated ACK encrypted with Falcon and stored:", storageKey);
+      } catch (falconError) {
+        console.error("Failed to encrypt generated ACK with Falcon:", falconError);
+      }
+      
+      // Compress for QR display
+      const compressed = compressPayload(ackQrPayload);
+      
+      return compressed;
+    } catch (err) {
+      console.error("Error generating acknowledgement QR:", err);
+      throw err;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-background">
+      <Navigation />
+      <div className="container mx-auto p-4 max-w-md">
+        <div className="text-center mb-6">
+          <h1 className="text-2xl font-bold text-foreground mb-2">Scan to Pay</h1>
+          <p className="text-muted-foreground">
+            Point your camera at a QR code to make a payment
+          </p>
+        </div>
+
+        <QRScannerCard onQRScanned={handleQRScanned} />
+
+        <TransactionReviewModal
+          isOpen={showReviewModal}
+          onClose={handleCloseModal}
+          transactionData={scannedData}
+        />
+
+        {showESGModal && merchantProfile && scannedData && (
+          <ESGTransactionModal
+            isOpen={showESGModal}
+            onClose={() => {
+              setShowESGModal(false);
+              setMerchantProfile(null);
+              setScannedData(null);
+            }}
+            merchant={merchantProfile}
+            transactionAmount={scannedData.amount || 0}
+            onConfirm={handleESGTransactionConfirm}
+          />
+        )}
+
+        {showAckModal && scannedData && (
+          <AcknowledgementQRModal
+            isOpen={showAckModal}
+            onClose={() => {
+              setShowAckModal(false);
+              setScannedData(null);
+            }}
+            paymentData={scannedData}
+            onGenerateAck={handleGenerateAcknowledgement}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
