@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,23 +10,51 @@ interface AcknowledgementQRModalProps {
   onClose: () => void;
   paymentData: any;
   onGenerateAck: (paymentData: any) => Promise<string>;
+  onShowESGImpact?: (impactData: any) => void;
 }
 
 export function AcknowledgementQRModal({
   isOpen,
   onClose,
   paymentData,
-  onGenerateAck
+  onGenerateAck,
+  onShowESGImpact
 }: AcknowledgementQRModalProps) {
   const [ackQrData, setAckQrData] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [qrSize, setQrSize] = useState(160);
   const { toast } = useToast();
+
+  useEffect(() => {
+    const updateQrSize = () => {
+      const maxSize = Math.min(200, window.innerWidth - 140);
+      setQrSize(Math.max(120, maxSize));
+    };
+    
+    updateQrSize();
+    window.addEventListener('resize', updateQrSize);
+    return () => window.removeEventListener('resize', updateQrSize);
+  }, []);
 
   const handleGenerateAck = async () => {
     try {
       setIsGenerating(true);
       const ackQr = await onGenerateAck(paymentData);
       setAckQrData(ackQr);
+      
+      // Check if this is an ESG merchant and show impact
+      const merchantId = paymentData.decrypted_data?.merchant_id;
+      const amount = paymentData.decrypted_data?.payment_data?.amount || 0;
+      
+      if (merchantId && onShowESGImpact) {
+        // Trigger ESG impact calculation and display
+        onShowESGImpact({
+          merchantId,
+          amount,
+          merchantName: paymentData.decrypted_data?.merchant || "ESG Merchant"
+        });
+      }
+      
       toast({
         title: "Acknowledgement QR Generated",
         description: "Show this QR code to the merchant to complete the transaction"
@@ -50,14 +78,14 @@ export function AcknowledgementQRModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-[95vw] w-full sm:max-w-md mx-4">
         <DialogHeader>
           <DialogTitle>Payment Confirmation</DialogTitle>
         </DialogHeader>
         
         <div className="space-y-4">
           <Card>
-            <CardHeader>
+            <CardHeader className="pb-3">
               <CardTitle className="text-lg">Payment Details</CardTitle>
             </CardHeader>
             <CardContent>
@@ -118,14 +146,14 @@ export function AcknowledgementQRModal({
           ) : (
             <div className="space-y-4">
               <Card>
-                <CardHeader>
+                <CardHeader className="pb-3">
                   <CardTitle className="text-center">Acknowledgement QR</CardTitle>
                 </CardHeader>
-                <CardContent className="flex justify-center">
-                  <div className="bg-white p-4 rounded-lg">
+                <CardContent className="flex justify-center p-3">
+                  <div className="bg-white p-2 sm:p-4 rounded-lg">
                     <QRCodeSVG 
                       value={ackQrData} 
-                      size={200}
+                      size={qrSize}
                       level="M"
                       includeMargin={true}
                     />

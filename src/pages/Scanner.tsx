@@ -1,6 +1,7 @@
 import { QRScannerCard } from "@/components/QRScannerCard";
 import { TransactionReviewModal } from "@/components/TransactionReviewModal";
 import { ESGTransactionModal } from "@/components/ESGTransactionModal";
+import { ESGImpactModal } from "@/components/ESGImpactModal";
 import { AcknowledgementQRModal } from "@/components/AcknowledgementQRModal";
 import { Navigation } from "@/components/Navigation";
 import { useMerchantPublic } from "@/hooks/useMerchantPublic";
@@ -8,6 +9,7 @@ import { useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { useOffline } from "@/contexts/OfflineContext";
+import { supabase } from "@/integrations/supabase/client";
 import {
   decompressPayload,
   decryptPayload,
@@ -31,7 +33,9 @@ export default function Scanner() {
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [showESGModal, setShowESGModal] = useState(false);
   const [showAckModal, setShowAckModal] = useState(false);
+  const [showESGImpactModal, setShowESGImpactModal] = useState(false);
   const [merchantProfile, setMerchantProfile] = useState<any>(null);
+  const [esgImpactData, setEsgImpactData] = useState<any>(null);
   const { getMerchantByQR } = useMerchantPublic();
   const { user } = useAuth();
   const { toast } = useToast();
@@ -65,9 +69,20 @@ export default function Scanner() {
         const paymentAmount = Math.abs(decrypted.payment_data?.amount || 0);
         
         if (!canAffordPayment(paymentAmount)) {
-          const errorMessage = availableBalance !== null 
-            ? `Insufficient funds. Available: MYR ${availableBalance.toFixed(2)}, Required: MYR ${paymentAmount.toFixed(2)}`
-            : `Payment exceeds offline limit. Limit: MYR ${offlinePaymentLimit.toFixed(2)}, Required: MYR ${paymentAmount.toFixed(2)}`;
+          let errorMessage = "Payment cannot be processed. ";
+          
+          if (availableBalance !== null && paymentAmount > availableBalance) {
+            errorMessage += `Insufficient balance. Available: MYR ${availableBalance.toFixed(2)}`;
+          } else if (paymentAmount > offlinePaymentLimit) {
+            errorMessage += `Payment exceeds offline limit of MYR ${offlinePaymentLimit.toFixed(2)}`;
+          } else {
+            errorMessage += `Payment amount: MYR ${paymentAmount.toFixed(2)}`;
+          }
+          
+          if (availableBalance !== null) {
+            errorMessage += `. Available balance: MYR ${availableBalance.toFixed(2)}`;
+          }
+          errorMessage += `. Offline payment limit: MYR ${offlinePaymentLimit.toFixed(2)}`;
             
           toast({
             title: "Payment Failed",
@@ -163,6 +178,62 @@ export default function Scanner() {
     setScannedData(null);
   };
 
+  const handleShowESGImpact = async (impactData: any) => {
+    try {
+      // Fetch merchant ESG data from Supabase
+      const { data: merchantData, error } = await supabase
+        .from('merchant_profiles')
+        .select(`
+          business_name,
+          environmental_score,
+          social_score,
+          governance_score,
+          esg_rating,
+          merchant_esg_tags (
+            esg_tags (
+              name,
+              category
+            )
+          )
+        `)
+        .eq('id', impactData.merchantId)
+        .eq('is_active', true)
+        .single();
+
+      if (error || !merchantData) {
+        console.error('Failed to fetch merchant ESG data:', error);
+        return;
+      }
+
+      // Calculate ESG points based on merchant scores and transaction amount
+      const baseMultiplier = 0.1; // Base points per MYR
+      const amount = impactData.amount;
+      
+      const environmentalPoints = Math.round((merchantData.environmental_score || 0) * baseMultiplier * amount);
+      const socialPoints = Math.round((merchantData.social_score || 0) * baseMultiplier * amount);
+      const governancePoints = Math.round((merchantData.governance_score || 0) * baseMultiplier * amount);
+      const totalPoints = environmentalPoints + socialPoints + governancePoints;
+
+      // Extract merchant tags
+      const merchantTags = merchantData.merchant_esg_tags?.map((tag: any) => tag.esg_tags.name) || [];
+
+      const esgImpact = {
+        environmental_points: environmentalPoints,
+        social_points: socialPoints,
+        governance_points: governancePoints,
+        total_points: totalPoints,
+        merchant_name: merchantData.business_name,
+        merchant_tags: merchantTags,
+        impact_description: `Supporting ${merchantData.esg_rating || 'sustainable'} business practices`
+      };
+
+      setEsgImpactData(esgImpact);
+      setShowESGImpactModal(true);
+    } catch (error) {
+      console.error('Error calculating ESG impact:', error);
+    }
+  };
+
   const handleGenerateAcknowledgement = async (paymentData: any) => {
     try {
       const timestamp = Date.now();
@@ -255,6 +326,18 @@ export default function Scanner() {
             }}
             paymentData={scannedData}
             onGenerateAck={handleGenerateAcknowledgement}
+            onShowESGImpact={handleShowESGImpact}
+          />
+        )}
+
+        {showESGImpactModal && esgImpactData && (
+          <ESGImpactModal
+            isOpen={showESGImpactModal}
+            onClose={() => {
+              setShowESGImpactModal(false);
+              setEsgImpactData(null);
+            }}
+            impactData={esgImpactData}
           />
         )}
       </div>

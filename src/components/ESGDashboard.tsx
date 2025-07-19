@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Leaf, Users, Shield, TrendingUp, Gift } from "lucide-react";
 import { useESGData } from "@/hooks/useESGData";
-import { useTransactions } from "@/hooks/useTransactions";
+
 import { RewardsModal } from "@/components/RewardsModal";
 import { useState } from "react";
 
@@ -25,17 +25,12 @@ interface ESGDashboardProps {
 
 export function ESGDashboard({ metrics }: ESGDashboardProps) {
   const { userESGPoints } = useESGData();
-  const { transactions } = useTransactions();
+  
   const [showRewardsModal, setShowRewardsModal] = useState(false);
   const sustainablePercentage = (metrics.sustainable_spending / metrics.total_spending) * 100;
   
-  // Calculate total impact points from transactions
-  const totalImpactPoints = transactions.reduce((total, transaction) => {
-    if (transaction.esg_score > 0) {
-      return total + Math.floor(transaction.esg_score * Math.abs(transaction.amount));
-    }
-    return total;
-  }, 0);
+  // Get total impact points from ESG data
+  const totalImpactPoints = userESGPoints?.total_points || 0;
   
   const getScoreColor = (score: number) => {
     if (score >= 0.8) return "text-success";

@@ -28,14 +28,19 @@ export default function Profile() {
   const handleSignOut = async () => {
     setIsSigningOut(true);
     try {
+      console.log('Starting sign out process...', { user, hasSession: !!user });
       const { error } = await signOut();
+      console.log('Sign out result:', { error });
+      
       if (error) {
+        console.error('Sign out error:', error);
         toast({
           title: "Error",
-          description: "Failed to sign out. Please try again.",
+          description: error.message || "Failed to sign out. Please try again.",
           variant: "destructive",
         });
       } else {
+        console.log('Sign out successful, navigating to auth...');
         toast({
           title: "Signed Out",
           description: "You have been signed out successfully.",
@@ -43,6 +48,7 @@ export default function Profile() {
         navigate("/auth");
       }
     } catch (error) {
+      console.error('Unexpected sign out error:', error);
       toast({
         title: "Error", 
         description: "An unexpected error occurred.",

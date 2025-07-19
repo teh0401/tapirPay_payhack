@@ -129,8 +129,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    return { error };
+    try {
+      // Check if this is a demo session (mock session)
+      if (session?.access_token === 'demo-bypass-token') {
+        // For demo sessions, just clear the local state
+        setUser(null);
+        setSession(null);
+        return { error: null };
+      }
+      
+      // For real sessions, use Supabase signOut
+      const { error } = await supabase.auth.signOut();
+      
+      // Clear state regardless of error to ensure UI updates
+      if (!error) {
+        setUser(null);
+        setSession(null);
+      }
+      
+      return { error };
+    } catch (error) {
+      console.error('Error during signOut:', error);
+      // Even if there's an error, clear local state to prevent stuck UI
+      setUser(null);
+      setSession(null);
+      return { error: { message: 'Sign out completed locally' } };
+    }
   };
 
   // Direct bypass method - completely ignores authentication

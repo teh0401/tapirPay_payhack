@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { QrCode, Store, Receipt, Leaf, HandCoins, Gift } from "lucide-react";
 import { useMerchantMode } from "@/contexts/MerchantModeContext";
 import { useESGData } from "@/hooks/useESGData";
-import { useTransactions } from "@/hooks/useTransactions";
+
 import { BalanceCard } from "@/components/BalanceCard";
 import { RewardsModal } from "@/components/RewardsModal";
 import { useState } from "react";
@@ -14,16 +14,11 @@ const Index = () => {
   const navigate = useNavigate();
   const { isMerchantMode } = useMerchantMode();
   const { userESGPoints } = useESGData();
-  const { transactions } = useTransactions();
+  
   const [showRewardsModal, setShowRewardsModal] = useState(false);
   
-  // Calculate total impact points from transactions
-  const totalImpactPoints = transactions.reduce((total, transaction) => {
-    if (transaction.esg_score > 0) {
-      return total + Math.floor(transaction.esg_score * Math.abs(transaction.amount));
-    }
-    return total;
-  }, 0);
+  // Get total impact points from ESG data
+  const totalImpactPoints = userESGPoints?.total_points || 0;
 
   return (
     <div className="container mx-auto p-4 max-w-md space-y-6">

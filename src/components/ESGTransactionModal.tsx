@@ -42,7 +42,7 @@ export const ESGTransactionModal: React.FC<ESGTransactionModalProps> = ({
 
   // Calculate ESG points based on merchant scores and transaction amount
   const calculateESGPoints = () => {
-    const baseMultiplier = Math.min(transactionAmount / 10, 10); // Cap at 10x multiplier
+    const baseMultiplier = Math.min(transactionAmount * 0.1, 10); // Cap at 10x multiplier
     const environmentalPoints = Math.round((merchant.environmental_score || 0) * baseMultiplier / 100);
     const socialPoints = Math.round((merchant.social_score || 0) * baseMultiplier / 100);
     const governancePoints = Math.round((merchant.governance_score || 0) * baseMultiplier / 100);

@@ -475,6 +475,14 @@ export type Database = {
         Args: { merchant_id: string }
         Returns: undefined
       }
+      redeem_esg_points: {
+        Args: { target_user_id: string; points_to_redeem: number }
+        Returns: boolean
+      }
+      update_user_esg_points: {
+        Args: { target_user_id: string }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never

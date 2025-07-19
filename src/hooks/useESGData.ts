@@ -54,6 +54,7 @@ export const useESGData = () => {
     if (!user) return;
 
     try {
+      // First try to get existing points
       const { data, error } = await supabase
         .from('user_esg_points')
         .select('*')
@@ -66,25 +67,24 @@ export const useESGData = () => {
       }
 
       if (!data) {
-        // Initialize user ESG points if they don't exist
-        const { data: newPoints, error: createError } = await supabase
-          .from('user_esg_points')
-          .insert({
-            user_id: user.id,
-            environmental_points: 0,
-            social_points: 0,
-            governance_points: 0,
-            total_points: 0
-          })
-          .select()
-          .single();
+        // Update/create points from transactions
+        await supabase.rpc('update_user_esg_points', {
+          target_user_id: user.id
+        });
 
-        if (createError) {
-          console.error('Error creating user ESG points:', createError);
+        // Fetch the updated points
+        const { data: updatedData, error: fetchError } = await supabase
+          .from('user_esg_points')
+          .select('*')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        if (fetchError) {
+          console.error('Error fetching updated ESG points:', fetchError);
           return;
         }
 
-        setUserESGPoints(newPoints);
+        setUserESGPoints(updatedData);
       } else {
         setUserESGPoints(data);
       }
@@ -206,11 +206,41 @@ export const useESGData = () => {
     }
   }, [user]);
 
+  const redeemPoints = async (pointsToRedeem: number) => {
+    if (!user) {
+      throw new Error('User not authenticated');
+    }
+
+    try {
+      const { data, error } = await supabase.rpc('redeem_esg_points', {
+        target_user_id: user.id,
+        points_to_redeem: pointsToRedeem
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data) {
+        throw new Error('Insufficient points for redemption');
+      }
+
+      // Refresh user points after successful redemption
+      await fetchUserESGPoints();
+      
+      return true;
+    } catch (error: any) {
+      console.error('Error redeeming points:', error);
+      throw error;
+    }
+  };
+
   return {
     userESGPoints,
     esgTransactions,
     loading,
     awardESGPoints,
+    redeemPoints,
     refetch: () => {
       fetchUserESGPoints();
       fetchESGTransactions();

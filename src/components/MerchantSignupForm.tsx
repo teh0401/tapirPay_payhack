@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   Form,
   FormControl,
@@ -57,6 +58,7 @@ const businessTypes = [
   'Manufacturing',
   'Agriculture',
   'Entertainment',
+  'Green Technology / Renewable Energy',
   'Other',
 ];
 
@@ -115,12 +117,14 @@ export const MerchantSignupForm = ({ onSuccess, onCancel, loading }: MerchantSig
                     <SelectValue placeholder="Select your business type" />
                   </SelectTrigger>
                 </FormControl>
-                <SelectContent>
-                  {businessTypes.map((type) => (
-                    <SelectItem key={type} value={type}>
-                      {type}
-                    </SelectItem>
-                  ))}
+                <SelectContent className="max-h-[200px]">
+                  <ScrollArea className="h-full">
+                    {businessTypes.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {type}
+                      </SelectItem>
+                    ))}
+                  </ScrollArea>
                 </SelectContent>
               </Select>
               <FormMessage />
