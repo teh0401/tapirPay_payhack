@@ -3,6 +3,8 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/use-toast';
 import { useOffline } from '@/contexts/OfflineContext';
+import localforage from 'localforage';
+import { calculateUserBalance } from '@/hooks/useBalanceCalculation';
 
 export interface UserProfile {
   id: string;
@@ -39,6 +41,21 @@ export function useProfile() {
     }
   }, [user]);
 
+  // Listen for transaction changes to refresh profile
+  useEffect(() => {
+    const handleTransactionChange = () => {
+      if (user) {
+        fetchProfile();
+      }
+    };
+
+    window.addEventListener('transactionCreated', handleTransactionChange);
+    
+    return () => {
+      window.removeEventListener('transactionCreated', handleTransactionChange);
+    };
+  }, [user]);
+
   const fetchProfile = async () => {
     if (!user) return;
 
@@ -48,39 +65,51 @@ export function useProfile() {
       // Check if this is a demo user (bypass mode)
       if (user.id === '00000000-0000-0000-0000-000000000000' || 
           session?.access_token === 'demo-bypass-token') {
-        // Get persisted demo balance or use default
-        const savedBalance = localStorage.getItem('demo-user-balance');
-        const demoBalance = savedBalance ? parseFloat(savedBalance) : 250.00;
         
-        // Return mock profile data for demo user
-        const mockProfile: UserProfile = {
+        // Try to load existing demo profile from storage first
+        const cachedDemoProfile = await localforage.getItem<UserProfile>(`profile_${user.id}`);
+        
+        const demoProfile: UserProfile = cachedDemoProfile || {
           id: 'demo-profile-id',
           user_id: user.id,
           full_name: 'Demo',
           email: 'demo@mydigitalid.gov.my',
           phone: '+60123456789',
           avatar_url: null,
-          esg_score: 90, // Fetched from esg_metrics overall_score
-          esg_level: 'Excellent', // Updated to match overall score
+          esg_score: 90,
+          esg_level: 'Excellent',
           digital_id: 'MY2024202608',
           is_verified: true,
-          balance: demoBalance, // Persisted demo balance
-          
+          balance: 260.00,
           total_transactions: 12,
           total_spent: 1850.25,
           created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         };
         
-        setProfile(mockProfile);
+        setProfile(demoProfile);
         
         // Store demo balance for offline validation
-        if (isOnline) {
-          updateStoredBalance(mockProfile.balance);
+        if (isOnline && updateStoredBalance) {
+          updateStoredBalance(demoProfile.balance);
         }
         
-        console.log("Demo profile loaded:", mockProfile);
+        console.log('Demo profile loaded:', demoProfile);
         return;
+      }
+
+      // Try to load cached profile first for offline support
+      if (!isOnline) {
+        try {
+          const cachedProfile = await localforage.getItem<UserProfile>('userProfile');
+          if (cachedProfile) {
+            setProfile(cachedProfile);
+            console.log("Cached profile loaded for offline mode:", cachedProfile);
+            return;
+          }
+        } catch (error) {
+          console.error('Failed to load cached profile:', error);
+        }
       }
       
       // Normal profile fetching for real users
@@ -125,21 +154,41 @@ export function useProfile() {
         else esgLevel = 'Beginner';
       }
 
-      // Combine profile data with ESG metrics
+      // Calculate real-time balance from transactions for regular users
+      const calculatedBalance = await calculateUserBalance(user.id);
+      
+      // Combine profile data with ESG metrics and updated balance
       const profileWithEsg = {
         ...profileData,
         esg_score: esgScore,
-        esg_level: esgLevel
+        esg_level: esgLevel,
+        balance: calculatedBalance
       };
 
       setProfile(profileWithEsg);
       
+      // Cache profile data for offline access
+      await localforage.setItem('userProfile', profileWithEsg);
+      
       // Store balance when online for offline validation
-      if (isOnline && profileWithEsg.balance !== undefined) {
-        updateStoredBalance(profileWithEsg.balance);
+      if (isOnline && updateStoredBalance) {
+        updateStoredBalance(calculatedBalance);
       }
     } catch (error) {
       console.error('Error fetching profile:', error);
+      
+      // Try to load cached profile if online fetch fails
+      try {
+        const cachedProfile = await localforage.getItem<UserProfile>('userProfile');
+        if (cachedProfile) {
+          setProfile(cachedProfile);
+          console.log("Fallback to cached profile due to fetch error:", cachedProfile);
+          return;
+        }
+      } catch (cacheError) {
+        console.error('Failed to load cached profile as fallback:', cacheError);
+      }
+      
       toast({
         title: "Error",
         description: "Failed to load profile data.",
@@ -193,17 +242,38 @@ export function useProfile() {
       if (user.id === '00000000-0000-0000-0000-000000000000' || 
           session?.access_token === 'demo-bypass-token') {
         // Update local profile state for demo user
-        const updatedProfile = { ...profile, ...updates };
+        const updatedProfile = { ...profile, ...updates, updated_at: new Date().toISOString() };
         setProfile(updatedProfile);
         
-        // Persist demo user balance to localStorage
-        if (updates.balance !== undefined) {
-          localStorage.setItem('demo-user-balance', updates.balance.toString());
+        // Cache updated demo profile with the user ID key for proper retrieval
+        await localforage.setItem(`profile_${user.id}`, updatedProfile);
+        
+        // Also update the offline context balance if balance was changed
+        if (updates.balance !== undefined && updateStoredBalance) {
+          updateStoredBalance(updates.balance);
         }
         
         toast({
           title: "Success",
           description: "Profile updated successfully.",
+        });
+        return { data: updatedProfile, error: null };
+      }
+
+      // If offline, store updates locally for later sync
+      if (!isOnline) {
+        const updatedProfile = { ...profile, ...updates };
+        setProfile(updatedProfile);
+        
+        // Cache updated profile
+        await localforage.setItem('userProfile', updatedProfile);
+        
+        // Store pending profile update
+        await localforage.setItem('pendingProfileUpdate', updates);
+        
+        toast({
+          title: "Success",
+          description: "Profile updated offline. Changes will sync when online.",
         });
         return { data: updatedProfile, error: null };
       }
@@ -217,17 +287,31 @@ export function useProfile() {
 
       if (error) throw error;
       
-      setProfile({
+      const updatedProfile = {
         ...data,
         esg_score: profile.esg_score,
         esg_level: profile.esg_level
-      });
+      };
+      
+      setProfile(updatedProfile);
+      
+      // Cache updated profile
+      await localforage.setItem('userProfile', updatedProfile);
+      
+      // Update stored balance if balance was changed
+      if (updates.balance !== undefined && updateStoredBalance) {
+        updateStoredBalance(updates.balance);
+      }
+      
+      // Clear any pending update since we just synced
+      await localforage.removeItem('pendingProfileUpdate');
+      
       toast({
         title: "Success",
         description: "Profile updated successfully.",
       });
       
-      return { data, error: null };
+      return { data: updatedProfile, error: null };
     } catch (error) {
       console.error('Error updating profile:', error);
       toast({
@@ -238,6 +322,38 @@ export function useProfile() {
       return { data: null, error };
     }
   };
+
+  // Sync pending profile updates when coming back online
+  const syncPendingProfileUpdates = async () => {
+    if (!isOnline || !user) return;
+    
+    try {
+      const pendingUpdate = await localforage.getItem<Partial<UserProfile>>('pendingProfileUpdate');
+      if (pendingUpdate) {
+        const { error } = await supabase
+          .from('profiles')
+          .update(pendingUpdate)
+          .eq('user_id', user.id);
+          
+        if (!error) {
+          await localforage.removeItem('pendingProfileUpdate');
+          toast({
+            title: "Profile Synced",
+            description: "Offline profile changes have been synced.",
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to sync pending profile updates:', error);
+    }
+  };
+
+  // Sync when coming back online
+  useEffect(() => {
+    if (isOnline && user) {
+      syncPendingProfileUpdates();
+    }
+  }, [isOnline, user]);
 
   return {
     profile,

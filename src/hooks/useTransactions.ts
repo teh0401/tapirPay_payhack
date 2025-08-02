@@ -3,6 +3,9 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProfile } from '@/hooks/useProfile';
 import { useToast } from '@/hooks/use-toast';
+import { useOffline } from '@/contexts/OfflineContext';
+import localforage from 'localforage';
+import { getFalconKeyPair, decryptPayloadWithFalcon } from '@/lib/falcon-encryption';
 
 export interface Transaction {
   id: string;
@@ -42,6 +45,7 @@ export function useTransactions() {
   const { user, session } = useAuth();
   const { profile } = useProfile();
   const { toast } = useToast();
+  const { isOnline, pendingTransactions } = useOffline();
 
   useEffect(() => {
     if (user) {
@@ -52,6 +56,36 @@ export function useTransactions() {
       setEsgMetrics(null);
       setLoading(false);
     }
+  }, [user]);
+
+  // Refetch when online status changes
+  useEffect(() => {
+    if (user && isOnline) {
+      fetchTransactions();
+    }
+  }, [isOnline]);
+
+  // Listen for transaction changes to refresh data (with debouncing)
+  useEffect(() => {
+    let timeout: NodeJS.Timeout;
+    
+    const handleTransactionChange = () => {
+      if (user) {
+        // Debounce the refresh to prevent multiple rapid calls
+        clearTimeout(timeout);
+        timeout = setTimeout(() => {
+          fetchTransactions();
+          fetchESGMetrics();
+        }, 100);
+      }
+    };
+
+    window.addEventListener('transactionCreated', handleTransactionChange);
+    
+    return () => {
+      window.removeEventListener('transactionCreated', handleTransactionChange);
+      clearTimeout(timeout);
+    };
   }, [user]);
 
   const fetchTransactions = async () => {
@@ -112,7 +146,70 @@ export function useTransactions() {
         return;
       }
       
-      // Normal transaction fetching for real users
+      // Try to load cached transactions first (always show something)
+      const cachedTransactions = await localforage.getItem<Transaction[]>(`transactions_${user.id}`);
+      if (cachedTransactions) {
+        setTransactions(cachedTransactions);
+        console.log("Loaded cached transactions:", cachedTransactions);
+      }
+
+      // If offline, merge with pending transactions and return
+      if (!isOnline) {
+        const offlineTransactions = [...(cachedTransactions || [])];
+        
+        // Add pending transactions with 'pending' status - decrypt them first to show proper amounts and recipient info
+        for (const encryptedPending of pendingTransactions) {
+          try {
+            // Decrypt the pending transaction to show proper amount and details
+            const decryptedPending = await decryptPayloadWithFalcon(encryptedPending);
+            
+            // Determine if this transaction belongs to the current user
+            const isUserTransaction = decryptedPending.user_id === user?.id || 
+                                    decryptedPending.buyer_id === user?.id || 
+                                    decryptedPending.seller_id === user?.id;
+            
+            if (isUserTransaction) {
+              // For income transactions, determine correct merchant/sender name
+              let merchantName = decryptedPending.merchant_name;
+              if (decryptedPending.transaction_type === 'income') {
+                // For income, try to get sender name from various fields
+                merchantName = decryptedPending.sender_name || 
+                             decryptedPending.buyer_email || 
+                             decryptedPending.sender_email ||
+                             `User ${decryptedPending.buyer_id?.slice(-8) || 'Unknown'}`;
+              }
+              
+              const pendingTransaction: Transaction = {
+                id: decryptedPending.id || `pending_${Date.now()}`,
+                title: decryptedPending.title || 'Offline Transaction',
+                description: decryptedPending.description,
+                amount: decryptedPending.amount || 0,
+                currency: decryptedPending.currency || 'MYR',
+                transaction_type: decryptedPending.transaction_type || 'expense',
+                status: 'pending',
+                merchant_name: merchantName,
+                location: decryptedPending.location,
+                tags: decryptedPending.tags,
+                esg_score: decryptedPending.esg_score || 0,
+                created_at: decryptedPending.created_at || new Date().toISOString(),
+              };
+            
+              // Add to beginning (most recent first)
+              offlineTransactions.unshift(pendingTransaction);
+            }
+          } catch (error) {
+            console.error('Failed to decrypt pending transaction for display:', error);
+            // Skip failed decryption instead of showing placeholder
+            // This prevents showing incorrect transaction details
+          }
+        }
+        
+        setTransactions(offlineTransactions);
+        setLoading(false);
+        return;
+      }
+
+      // Online: fetch from database
       const { data, error } = await supabase
         .from('transactions')
         .select(`
@@ -126,21 +223,106 @@ export function useTransactions() {
         throw error;
       }
 
-      setTransactions(data?.map(transaction => ({
-        ...transaction,
+      const freshTransactions: Transaction[] = data?.map(transaction => ({
+        id: transaction.id,
+        title: transaction.title,
+        description: transaction.description || undefined,
+        amount: transaction.amount,
+        currency: transaction.currency || 'MYR',
         transaction_type: transaction.transaction_type as 'income' | 'expense',
-        status: transaction.status as 'completed' | 'pending' | 'failed'
-      })) || []);
+        status: transaction.status as 'completed' | 'pending' | 'failed',
+        merchant_name: transaction.merchant_name || undefined,
+        location: transaction.location || undefined,
+        tags: transaction.tags || undefined,
+        esg_score: transaction.esg_score || 0,
+        created_at: transaction.created_at,
+        category: transaction.category || undefined
+      })) || [];
+
+      // Cache the fresh data (only the mapped Transaction objects)
+      await localforage.setItem(`transactions_${user.id}`, freshTransactions);
+      
+      // Merge with pending transactions (show pending at the top)
+      const allTransactions = [...freshTransactions];
+      
+      // Decrypt and process pending transactions
+      for (const encryptedPending of pendingTransactions) {
+        try {
+          // Decrypt the pending transaction
+          const decryptedTransaction = await decryptPayloadWithFalcon(encryptedPending);
+          
+          // For income transactions, determine correct merchant/sender name
+          let merchantName = decryptedTransaction.merchant_name;
+          if (decryptedTransaction.transaction_type === 'income') {
+            // For income, try to get sender name from various fields
+            merchantName = decryptedTransaction.sender_name || 
+                         decryptedTransaction.buyer_email || 
+                         decryptedTransaction.sender_email ||
+                         `User ${decryptedTransaction.buyer_id?.slice(-8) || 'Unknown'}`;
+          }
+          
+          const pendingTransaction: Transaction = {
+            id: decryptedTransaction.id || `pending_${Date.now()}`,
+            title: decryptedTransaction.title || 'Offline Transaction',
+            description: decryptedTransaction.description,
+            amount: decryptedTransaction.amount || 0,
+            currency: decryptedTransaction.currency || 'MYR',
+            transaction_type: decryptedTransaction.transaction_type || 'expense',
+            status: 'pending',
+            merchant_name: merchantName,
+            location: decryptedTransaction.location,
+            tags: decryptedTransaction.tags,
+            esg_score: decryptedTransaction.esg_score || 0,
+            created_at: decryptedTransaction.created_at || new Date().toISOString(),
+          };
+          
+          // Add to beginning (most recent first)
+          allTransactions.unshift(pendingTransaction);
+        } catch (error) {
+          console.error('Failed to decrypt pending transaction:', error);
+          // Add a placeholder for failed decryption
+          allTransactions.unshift({
+            id: `pending_failed_${Date.now()}`,
+            title: 'Encrypted Transaction',
+            description: 'Failed to decrypt offline transaction',
+            amount: 0,
+            currency: 'MYR',
+            transaction_type: 'expense',
+            status: 'pending',
+            esg_score: 0,
+            created_at: new Date().toISOString(),
+          });
+        }
+      }
+
+      setTransactions(allTransactions);
+      console.log("Fetched and cached transactions:", allTransactions);
     } catch (error) {
       console.error('Error fetching transactions:', error);
-      toast({
-        title: "Error",
-        description: "Failed to load transactions.",
-        variant: "destructive",
-      });
       
-      // Don't use demo data as fallback for real users
-      setTransactions([]);
+      // If online fetch fails, try to use cached data
+      try {
+        const cachedTransactions = await localforage.getItem<Transaction[]>(`transactions_${user.id}`);
+        if (cachedTransactions) {
+          setTransactions(cachedTransactions);
+          console.log("Fallback to cached transactions due to error");
+        } else {
+          setTransactions([]);
+        }
+      } catch (cacheError) {
+        console.error('Error loading cached transactions:', cacheError);
+        setTransactions([]);
+      }
+      
+      // Show error only if we don't have cached data
+      const hasCachedData = await localforage.getItem<Transaction[]>(`transactions_${user.id}`);
+      if (!hasCachedData) {
+        toast({
+          title: "Error",
+          description: "Failed to load transactions.",
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -169,7 +351,22 @@ export function useTransactions() {
         return;
       }
       
-      // Normal ESG metrics fetching for real users
+      // Try to load cached ESG metrics first
+      const cachedESGMetrics = await localforage.getItem<ESGMetrics>(`esg_metrics_${user.id}`);
+      if (cachedESGMetrics) {
+        setEsgMetrics(cachedESGMetrics);
+        console.log("Loaded cached ESG metrics:", cachedESGMetrics);
+      }
+
+      // If offline, use cached data and return
+      if (!isOnline) {
+        if (!cachedESGMetrics) {
+          setEsgMetrics(null);
+        }
+        return;
+      }
+
+      // Online: fetch from database
       const { data, error } = await supabase
         .from('esg_metrics')
         .select('*')
@@ -183,15 +380,42 @@ export function useTransactions() {
       }
 
       if (data) {
-        setEsgMetrics(data);
+        const esgData: ESGMetrics = {
+          environmental_score: data.environmental_score || 0,
+          social_score: data.social_score || 0,
+          governance_score: data.governance_score || 0,
+          overall_score: data.overall_score || 0,
+          carbon_footprint: data.carbon_footprint || 0,
+          sustainable_spending: data.sustainable_spending || 0,
+          total_spending: data.total_spending || 0
+        };
+        
+        // Cache the fresh data
+        await localforage.setItem(`esg_metrics_${user.id}`, esgData);
+        setEsgMetrics(esgData);
+        console.log("Fetched and cached ESG metrics:", esgData);
       } else {
-        // No ESG metrics available for real users with no transactions
+        // No ESG metrics available
         setEsgMetrics(null);
+        // Clear cached data if none available
+        await localforage.removeItem(`esg_metrics_${user.id}`);
       }
     } catch (error) {
       console.error('Error fetching ESG metrics:', error);
-      // Don't use demo data as fallback for real users
-      setEsgMetrics(null);
+      
+      // If online fetch fails, try to use cached data
+      try {
+        const cachedESGMetrics = await localforage.getItem<ESGMetrics>(`esg_metrics_${user.id}`);
+        if (cachedESGMetrics) {
+          setEsgMetrics(cachedESGMetrics);
+          console.log("Fallback to cached ESG metrics due to error");
+        } else {
+          setEsgMetrics(null);
+        }
+      } catch (cacheError) {
+        console.error('Error loading cached ESG metrics:', cacheError);
+        setEsgMetrics(null);
+      }
     }
   };
 

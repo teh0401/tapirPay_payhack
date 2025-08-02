@@ -39,8 +39,8 @@ const App = () => (
   <QueryClientProvider client={queryClient}>
     <ThemeProvider attribute="class" defaultTheme="light" enableSystem>
       <AuthProvider>
-        <MerchantModeProvider>
-          <OfflineProvider>
+        <OfflineProvider>
+          <MerchantModeProvider>
             <TooltipProvider>
               <Toaster />
               <Sonner />
@@ -93,8 +93,8 @@ const App = () => (
                 </div>
               </BrowserRouter>
             </TooltipProvider>
-          </OfflineProvider>
-        </MerchantModeProvider>
+          </MerchantModeProvider>
+        </OfflineProvider>
       </AuthProvider>
     </ThemeProvider>
   </QueryClientProvider>

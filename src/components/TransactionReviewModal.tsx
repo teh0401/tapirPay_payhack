@@ -14,23 +14,30 @@ import { useOffline } from "@/contexts/OfflineContext";
 import { useToast } from "@/hooks/use-toast";
 import { CheckCircle, Store, Tag } from "lucide-react";
 import { useState } from "react";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface TransactionReviewModalProps {
   isOpen: boolean;
   onClose: () => void;
   transactionData: any;
+  onPaymentApproved?: (transactionData: any) => void;
 }
 
 export function TransactionReviewModal({ 
   isOpen, 
   onClose, 
-  transactionData 
+  transactionData,
+  onPaymentApproved
 }: TransactionReviewModalProps) {
   const [isProcessing, setIsProcessing] = useState(false);
-  const { addPendingTransaction } = useOffline();
+  const { addPendingTransaction, addTransaction } = useOffline();
   const { toast } = useToast();
+  const { user } = useAuth();
 
   if (!transactionData) return null;
+
+  // Extract the actual amount from the nested payment data
+  const paymentAmount = transactionData.decrypted_data?.payment_data?.amount || 0;
 
   const handleApprovePayment = async () => {
     setIsProcessing(true);
@@ -39,15 +46,23 @@ export function TransactionReviewModal({
       // Mock Falcon signing process
       const signedTransaction = {
         ...transactionData,
-        buyerId: "buyer123", // TODO: Get from auth
+        user_id: user?.id || transactionData.buyer_id,
+        title: transactionData.title || 'QR Payment',
+        amount: -(Math.abs(paymentAmount)), // Negative for expense
+        transaction_type: 'expense',
+        merchant_name: transactionData.decrypted_data?.merchant || transactionData.merchant_name,
+        location: transactionData.location,
+        tags: transactionData.esgTags || [],
+        esg_score: transactionData.esgScore || 0,
         signature: "falcon_signature_" + Date.now(), // Mock signature
         nonce: Math.random().toString(36).substring(7),
         signedAt: Date.now(),
-        status: "pending",
+        status: "completed", // Set to completed instead of pending
+        description: transactionData.decrypted_data?.description || transactionData.description || "QR Payment",
       };
 
-      // Add to offline queue
-      await addPendingTransaction(signedTransaction);
+      // Use addTransaction which handles online/offline properly
+      await addTransaction(signedTransaction);
       
       toast({
         title: "Payment Approved",
@@ -55,7 +70,12 @@ export function TransactionReviewModal({
         duration: 3000,
       });
 
-      onClose();
+      // Trigger acknowledgment modal instead of just closing
+      if (onPaymentApproved) {
+        onPaymentApproved(signedTransaction);
+      } else {
+        onClose();
+      }
     } catch (error) {
       toast({
         title: "Payment Failed",
@@ -95,7 +115,7 @@ export function TransactionReviewModal({
             <CardContent className="pt-4">
               <div className="text-center space-y-2">
                 <p className="text-2xl font-bold text-primary">
-                  MYR {transactionData.amount?.toFixed(2) || "0.00"}
+                  MYR {paymentAmount?.toFixed(2) || "0.00"}
                 </p>
                 <p className="text-muted-foreground">
                   {transactionData.description || "Payment"}

@@ -42,9 +42,18 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      if (!manualOffline) {
-        syncPendingTransactions();
-      }
+      // Auto-sync when coming back online - multiple attempts for reliability
+      const attemptSync = () => {
+        if (navigator.onLine && pendingTransactions.length > 0) {
+          console.log('Auto-syncing pending transactions...');
+          syncPendingTransactions();
+        }
+      };
+
+      // Immediate attempt
+      attemptSync();
+      // Backup attempt in case first fails
+      setTimeout(attemptSync, 500);
     };
     
     const handleOffline = () => setIsOnline(false);
@@ -56,11 +65,20 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
     loadPendingTransactions();
     loadStoredBalance();
 
+    // Periodic auto-sync check when online (every 2 seconds to prevent spam)
+    const syncInterval = setInterval(() => {
+      if (navigator.onLine && !manualOffline && pendingTransactions.length > 0) {
+        console.log('Periodic auto-sync check...');
+        syncPendingTransactions();
+      }
+    }, 2000);
+
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      clearInterval(syncInterval);
     };
-  }, [manualOffline]);
+  }, [manualOffline, pendingTransactions.length]);
 
   const loadStoredBalance = async () => {
     try {
@@ -144,10 +162,8 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
           ? id 
           : undefined; // Let Supabase generate a new UUID
         
-        // Ensure required fields are present
+        // Ensure required fields are present and clean up QR-specific fields
         const formattedTransaction = {
-          ...transactionData,
-          ...(transactionId && { id: transactionId }),
           user_id: transactionData.user_id || transactionData.buyer_id || user?.id,
           created_at: transactionData.created_at || new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -156,25 +172,57 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
           transaction_type: transactionData.transaction_type || 'expense',
           currency: transactionData.currency || 'MYR',
           status: transactionData.status || 'completed',
+          description: transactionData.description || null,
+          merchant_name: transactionData.merchant_name || null,
+          location: transactionData.location || null,
+          tags: transactionData.tags || [],
+          esg_score: transactionData.esg_score || 0,
+          ...(transactionId && { id: transactionId }),
         };
         
         // Remove any fields that shouldn't be in the transactions table
-        const { buyer_id, seller_id, ...cleanTransaction } = formattedTransaction;
+        const { 
+          buyer_id: removeBuyerId, 
+          seller_id: removeSellerId, 
+          type: removeType,
+          encrypted_data: removeEncryptedData,
+          encryption_key: removeEncryptionKey,
+          signature: removeSignature,
+          signature_key: removeSignatureKey,
+          iv: removeIv,
+          decrypted_data: removeDecryptedData,
+          nonce: removeNonce,
+          signedAt: removeSignedAt,
+          expiresAt: removeExpiresAt,
+          ...cleanTransaction 
+        } = {...transactionData, ...formattedTransaction};
+        
+        console.log("About to insert transaction for real user:", {
+          userId: user?.id,
+          cleanTransaction
+        });
         
         const { error } = await supabase
           .from('transactions')
           .insert([cleanTransaction]);
           
-        if (error) {
-          console.error('Error syncing transaction immediately:', error);
-          // If immediate sync fails, add to pending queue
-          await addPendingTransaction(transaction);
-        } else {
-          toast({
-            title: "Transaction Synced",
-            description: "Transaction saved and synced to server.",
-          });
-        }
+          if (error) {
+            console.error('Error syncing transaction immediately:', error);
+            // If immediate sync fails, add to pending queue
+            await addPendingTransaction(transaction);
+          } else {
+            console.log("Transaction successfully inserted to database:", cleanTransaction.id);
+            
+            // Force immediate refresh of transaction and profile data
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('transactionCreated'));
+            }, 100);
+            
+            toast({
+              title: "Transaction Synced",
+              description: "Transaction saved and synced to server.",
+            });
+          }
       } catch (error) {
         console.error('Failed to sync transaction immediately:', error);
         // If immediate sync fails, add to pending queue
@@ -208,6 +256,11 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
           throw error;
         }
 
+          // Force immediate refresh with delay to ensure DB consistency
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('transactionCreated'));
+          }, 100);
+         
          toast({
            title: "Transaction Complete",
            description: "P2P transaction processed successfully.",
@@ -343,23 +396,40 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
             ? id 
             : undefined; // Let Supabase generate a new UUID
           
-          // Ensure required fields are present
+          // Ensure required fields are present and clean up QR-specific fields
           const formattedTransaction = {
-            ...transactionData,
-            ...(transactionId && { id: transactionId }), // Only include id if it's a valid UUID
             user_id: transactionData.user_id || transactionData.buyer_id || user?.id,
             created_at: transactionData.created_at || new Date().toISOString(),
             updated_at: new Date().toISOString(),
-            // Ensure required fields have defaults
             title: transactionData.title || 'Offline Transaction',
             amount: transactionData.amount || 0,
             transaction_type: transactionData.transaction_type || 'expense',
             currency: transactionData.currency || 'MYR',
             status: transactionData.status || 'completed',
+            description: transactionData.description || null,
+            merchant_name: transactionData.merchant_name || null,
+            location: transactionData.location || null,
+            tags: transactionData.tags || [],
+            esg_score: transactionData.esg_score || 0,
+            ...(transactionId && { id: transactionId }), // Only include id if it's a valid UUID
           };
           
           // Remove any fields that shouldn't be in the transactions table
-          const { buyer_id, seller_id, ...cleanTransaction } = formattedTransaction;
+          const { 
+            buyer_id: removeBuyerId, 
+            seller_id: removeSellerId, 
+            type: removeType,
+            encrypted_data: removeEncryptedData,
+            encryption_key: removeEncryptionKey,
+            signature: removeSignature,
+            signature_key: removeSignatureKey,
+            iv: removeIv,
+            decrypted_data: removeDecryptedData,
+            nonce: removeNonce,
+            signedAt: removeSignedAt,
+            expiresAt: removeExpiresAt,
+            ...cleanTransaction 
+          } = {...transactionData, ...formattedTransaction};
           
           console.log('Syncing verified transaction:', cleanTransaction);
           
@@ -385,10 +455,15 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
       setPendingTransactions(remainingTransactions);
 
       if (failedTransactions.length === 0) {
-        toast({
-          title: "Sync Complete",
-          description: `${pendingTransactions.length} Falcon-encrypted transactions verified and synced.`,
-        });
+         // Force immediate refresh with delay to ensure DB consistency
+         setTimeout(() => {
+           window.dispatchEvent(new CustomEvent('transactionCreated'));
+         }, 200);
+         
+         toast({
+           title: "Sync Complete",
+           description: `${pendingTransactions.length} Falcon-encrypted transactions verified and synced.`,
+         });
       } else {
         toast({
           title: "Partial Sync",

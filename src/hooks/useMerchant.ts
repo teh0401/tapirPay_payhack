@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/use-toast';
+import { useOffline } from '@/contexts/OfflineContext';
+import localforage from 'localforage';
 
 export interface MerchantProfile {
   id: string;
@@ -37,6 +39,7 @@ export interface MerchantSignupData {
 export const useMerchant = () => {
   const { user, session } = useAuth();
   const { toast } = useToast();
+  const { isOnline } = useOffline();
   const [merchantProfile, setMerchantProfile] = useState<MerchantProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [evaluating, setEvaluating] = useState(false);
@@ -48,6 +51,17 @@ export const useMerchant = () => {
     }
 
     try {
+      // Always try to load cached profile first
+      const cachedProfile = await localforage.getItem<MerchantProfile>('merchantProfile');
+      
+      if (!isOnline) {
+        // If offline, only use cached data
+        setMerchantProfile(cachedProfile);
+        setLoading(false);
+        return;
+      }
+
+      // If online, fetch from Supabase
       const { data, error } = await supabase
         .from('merchant_profiles')
         .select('*')
@@ -56,27 +70,30 @@ export const useMerchant = () => {
 
       if (error && error.code !== 'PGRST116') {
         console.error('Error fetching merchant profile:', error);
-        toast({
-          title: "Error",
-          description: "Failed to load merchant profile",
-          variant: "destructive",
-        });
+        // Use cached data as fallback
+        if (cachedProfile) {
+          setMerchantProfile(cachedProfile);
+        }
       } else {
         setMerchantProfile(data);
         
-        // Store in localStorage for offline support
+        // Cache merchant profile for offline support
         if (data) {
-          localStorage.setItem('merchantProfile', JSON.stringify(data));
+          await localforage.setItem('merchantProfile', data);
         } else {
-          localStorage.removeItem('merchantProfile');
+          await localforage.removeItem('merchantProfile');
         }
       }
     } catch (error) {
       console.error('Error fetching merchant profile:', error);
-      // Try to load from localStorage if online fetch fails
-      const cachedProfile = localStorage.getItem('merchantProfile');
-      if (cachedProfile) {
-        setMerchantProfile(JSON.parse(cachedProfile));
+      // Try to load from cache if fetch fails
+      try {
+        const cachedProfile = await localforage.getItem<MerchantProfile>('merchantProfile');
+        if (cachedProfile) {
+          setMerchantProfile(cachedProfile);
+        }
+      } catch (cacheError) {
+        console.error('Failed to load cached merchant profile as fallback:', cacheError);
       }
     } finally {
       setLoading(false);
@@ -138,6 +155,24 @@ export const useMerchant = () => {
     }
 
     try {
+      // If offline, store updates locally for later sync
+      if (!isOnline) {
+        const updatedProfile = { ...merchantProfile, ...updates };
+        setMerchantProfile(updatedProfile);
+        
+        // Cache updated profile
+        await localforage.setItem('merchantProfile', updatedProfile);
+        
+        // Store pending merchant update
+        await localforage.setItem('pendingMerchantUpdate', { id: merchantProfile.id, updates });
+        
+        toast({
+          title: "Success",
+          description: "Merchant profile updated offline. Changes will sync when online.",
+        });
+        return;
+      }
+
       const { error } = await supabase
         .from('merchant_profiles')
         .update(updates)
@@ -163,6 +198,39 @@ export const useMerchant = () => {
       throw error;
     }
   };
+
+  // Sync pending merchant updates when coming back online
+  const syncPendingMerchantUpdates = async () => {
+    if (!isOnline || !user) return;
+    
+    try {
+      const pendingUpdate = await localforage.getItem<{ id: string; updates: Partial<MerchantSignupData> }>('pendingMerchantUpdate');
+      if (pendingUpdate) {
+        const { error } = await supabase
+          .from('merchant_profiles')
+          .update(pendingUpdate.updates)
+          .eq('id', pendingUpdate.id);
+          
+        if (!error) {
+          await localforage.removeItem('pendingMerchantUpdate');
+          await fetchMerchantProfile(); // Refresh profile
+          toast({
+            title: "Merchant Profile Synced",
+            description: "Offline merchant changes have been synced.",
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to sync pending merchant updates:', error);
+    }
+  };
+
+  // Sync when coming back online
+  useEffect(() => {
+    if (isOnline && user) {
+      syncPendingMerchantUpdates();
+    }
+  }, [isOnline, user]);
 
   const evaluateESGScore = async (profileId: string, merchantData: MerchantSignupData) => {
     try {

@@ -51,6 +51,10 @@ export default function Scanner() {
       
       const { type, encrypted_data, encryption_key, signature, signature_key, iv, user_id } = decompressed;
       
+      console.log("QR Type detected:", type);
+      console.log("User ID in QR:", user_id);
+      console.log("Current user ID:", user?.id);
+      
       // Decode encryption key and verify signature
       const keyArray = base85.decode(encryption_key);
       const isValid = verifySignature(encrypted_data, iv, signature, signature_key);
@@ -111,7 +115,7 @@ export default function Scanner() {
         }
         
         setScannedData(paymentData);
-        setShowAckModal(true);
+        setShowReviewModal(true);
         
       } else if (type === "ACK") {
         // Handle Acknowledgement QR - Transaction Complete
@@ -124,6 +128,16 @@ export default function Scanner() {
         // Get the buyer/seller IDs correctly
         const buyerId = decompressed.user_id; // The ACK generator is the buyer
         const sellerId = user?.id; // Current user scanning ACK is the seller
+        
+        console.log("ACK processing debug:", { 
+          buyerId, 
+          sellerId, 
+          decrypted, 
+          decompressed,
+          'decrypted.amount': decrypted.amount,
+          'typeof decrypted': typeof decrypted
+        });
+        
         const amount = Math.abs(decrypted.amount || 0);
         
         if (!buyerId || !sellerId) {
@@ -135,15 +149,42 @@ export default function Scanner() {
           return;
         }
         
-        // Create P2P transaction (buyer pays seller)
-        await addP2PTransaction(buyerId, sellerId, amount, {
-          title: "QR Payment Transaction",
-          description: "Payment via QR Code",
-          merchant_name: decrypted.merchant || "Unknown Merchant",
-          location: decrypted.location || null,
-          tags: ["qr-payment"],
-          esg_score: 0.5 // Default ESG score
-        });
+        if (buyerId === sellerId) {
+          toast({
+            title: "Transaction Error",
+            description: "Cannot process transaction with yourself",
+            variant: "destructive"
+          });
+          return;
+        }
+        
+        try {
+          // Create P2P transaction (buyer pays seller)
+          await addP2PTransaction(buyerId, sellerId, amount, {
+            title: "QR Payment Transaction",
+            description: "Payment via QR Code acknowledgment",
+            merchant_name: decrypted.merchant || "Unknown Merchant",
+            location: decrypted.location || null,
+            tags: ["qr-payment", "acknowledged"],
+            esg_score: 0.5 // Default ESG score
+          });
+          
+          toast({
+            title: "Payment Received!",
+            description: `Successfully received MYR ${amount.toFixed(2)} from customer`,
+            duration: 4000,
+          });
+          
+          
+        } catch (error) {
+          console.error("Failed to process acknowledgment:", error);
+          toast({
+            title: "Transaction Failed",
+            description: "Failed to process payment acknowledgment",
+            variant: "destructive"
+          });
+          return;
+        }
         
         // Store encrypted ACK copy in local storage for records using Falcon
         try {
@@ -170,6 +211,12 @@ export default function Scanner() {
   const handleCloseModal = () => {
     setShowReviewModal(false);
     setScannedData(null);
+  };
+
+  const handlePaymentApproved = (transactionData: any) => {
+    setShowReviewModal(false);
+    setShowAckModal(true);
+    // Keep scannedData for acknowledgment modal
   };
 
   const handleESGTransactionConfirm = () => {
@@ -301,6 +348,7 @@ export default function Scanner() {
           isOpen={showReviewModal}
           onClose={handleCloseModal}
           transactionData={scannedData}
+          onPaymentApproved={handlePaymentApproved}
         />
 
         {showESGModal && merchantProfile && scannedData && (

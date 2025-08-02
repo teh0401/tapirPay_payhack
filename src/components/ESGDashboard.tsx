@@ -7,6 +7,7 @@ import { Leaf, Users, Shield, TrendingUp, Gift } from "lucide-react";
 import { useESGData } from "@/hooks/useESGData";
 
 import { RewardsModal } from "@/components/RewardsModal";
+import { VisualImpactSummary } from "@/components/VisualImpactSummary";
 import { useState } from "react";
 
 interface ESGMetrics {
@@ -30,7 +31,7 @@ export function ESGDashboard({ metrics }: ESGDashboardProps) {
   const sustainablePercentage = (metrics.sustainable_spending / metrics.total_spending) * 100;
   
   // Get total impact points from ESG data
-  const totalImpactPoints = userESGPoints?.total_points || 0;
+  const totalImpactPoints = userESGPoints?.total_points || 1000;
   
   const getScoreColor = (score: number) => {
     if (score >= 0.8) return "text-success";
@@ -233,6 +234,9 @@ export function ESGDashboard({ metrics }: ESGDashboardProps) {
           </div>
         </CardContent>
       </Card>
+
+      {/* Visual Impact Summary */}
+      <VisualImpactSummary />
 
       <RewardsModal 
         isOpen={showRewardsModal}

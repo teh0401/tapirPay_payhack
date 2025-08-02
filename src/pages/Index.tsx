@@ -18,7 +18,7 @@ const Index = () => {
   const [showRewardsModal, setShowRewardsModal] = useState(false);
   
   // Get total impact points from ESG data
-  const totalImpactPoints = userESGPoints?.total_points || 0;
+  const totalImpactPoints = userESGPoints?.total_points || 1000;
 
   return (
     <div className="container mx-auto p-4 max-w-md space-y-6">

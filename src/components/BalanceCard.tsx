@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Plus, Wallet } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useProfile } from "@/hooks/useProfile";
 import { supabase } from "@/integrations/supabase/client";
@@ -14,8 +14,23 @@ export function BalanceCard() {
   const [reloadAmount, setReloadAmount] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const { user } = useAuth();
-  const { profile, updateProfile } = useProfile();
+  const { profile, updateProfile, refetch } = useProfile();
   const { toast } = useToast();
+
+  // Listen for transaction changes to refresh balance
+  useEffect(() => {
+    const handleTransactionChange = () => {
+      if (user && refetch) {
+        refetch();
+      }
+    };
+
+    window.addEventListener('transactionCreated', handleTransactionChange);
+    
+    return () => {
+      window.removeEventListener('transactionCreated', handleTransactionChange);
+    };
+  }, [user, refetch]);
 
   const handleReload = async () => {
     if (!user || !reloadAmount) return;
@@ -34,9 +49,35 @@ export function BalanceCard() {
     try {
       const newBalance = (profile?.balance || 0) + amount;
       
+      // Create a transaction record for the reload
+      const { error: transactionError } = await supabase
+        .from('transactions')
+        .insert({
+          user_id: user.id,
+          title: 'Account Reload',
+          description: `Top-up of MYR ${amount.toFixed(2)}`,
+          amount: amount, // Positive amount for income
+          currency: 'MYR',
+          transaction_type: 'income',
+          status: 'completed',
+          merchant_name: 'MyDigitalID Reload System',
+          location: 'Malaysia',
+          tags: ['reload', 'top-up'],
+          esg_score: 0,
+        });
+
+      if (transactionError) {
+        console.error('Error creating reload transaction:', transactionError);
+        throw transactionError;
+      }
+
+      // Update profile balance
       const result = await updateProfile({ balance: newBalance });
       
       if (result.error) throw result.error;
+
+      // Trigger transaction refresh
+      window.dispatchEvent(new CustomEvent('transactionCreated'));
 
       toast({
         title: "Balance Reloaded",
